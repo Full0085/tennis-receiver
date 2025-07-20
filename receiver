@@ -1,0 +1,189 @@
+package com.example.socialtennismanager
+
+import android.app.AlertDialog
+import android.content.Context
+import android.net.wifi.WifiManager
+import androidx.appcompat.app.AppCompatActivity
+import android.os.Bundle
+import android.util.Log
+import android.view.Menu // <-- IMPORT Menu
+import android.webkit.ConsoleMessage
+import android.webkit.JsResult
+import android.webkit.WebChromeClient
+import android.webkit.WebView
+import android.webkit.WebViewClient
+import com.google.android.gms.cast.framework.CastButtonFactory // <-- IMPORT Cast
+import com.google.android.gms.cast.framework.CastContext
+import com.google.android.gms.cast.framework.CastSession
+import com.google.android.gms.cast.framework.SessionManager
+import com.google.android.gms.cast.framework.SessionManagerListener
+import java.io.IOException // <-- IMPORT IOException
+
+class MainActivity : AppCompatActivity() {
+
+    // --- NEW: CHROMECAST AND SERVER PROPERTIES ---
+    private lateinit var sessionManager: SessionManager
+    private var castSession: CastSession? = null
+    private var server: AndroidWebServer? = null
+    private val serverPort = 8080
+
+    // The custom namespace must match the one in your receiver.html
+    private val MESSAGE_NAMESPACE = "urn:x-cast:com.example.socialtennismanager"
+
+    private val sessionManagerListener = object : SessionManagerListener<CastSession> {
+        override fun onSessionStarted(session: CastSession, sessionId: String) {
+            castSession = session
+            // When the session starts, get the local IP and send the URL to the receiver
+            val localUrl = getLocalIpAddress()
+            if (localUrl != null) {
+                // The URL will be like "http://192.168.1.5:8080"
+                sendMessageToReceiver(localUrl)
+            } else {
+                Log.e("MainActivity", "Could not get local IP address.")
+            }
+        }
+
+        override fun onSessionResumed(session: CastSession, wasSuspended: Boolean) {
+            castSession = session
+        }
+
+        override fun onSessionEnded(session: CastSession, error: Int) {
+            castSession = null
+        }
+        
+        // Other callbacks can be left empty
+        override fun onSessionStarting(session: CastSession) {}
+        override fun onSessionStartFailed(session: CastSession, error: Int) {}
+        override fun onSessionEnding(session: CastSession) {}
+        override fun onSessionResuming(session: CastSession, sessionId: String) {}
+        override fun onSessionResumeFailed(session: CastSession, error: Int) {}
+        override fun onSessionSuspended(session: CastSession, reason: Int) {}
+    }
+    // --- END OF NEW PROPERTIES ---
+
+
+    override fun onCreate(savedInstanceState: Bundle?) {
+        super.onCreate(savedInstanceState)
+        setContentView(R.layout.activity_main)
+
+        // --- NEW: CHROMECAST INITIALIZATION ---
+        CastContext.getSharedInstance(this)
+        sessionManager = CastContext.getSharedInstance(this).sessionManager
+        // --- END OF INITIALIZATION ---
+
+        val webView = findViewById<WebView>(R.id.webview)
+
+        // Your existing WebView settings are perfect
+        val webSettings = webView.settings
+        webSettings.javaScriptEnabled = true
+        webSettings.domStorageEnabled = true
+        webView.webViewClient = WebViewClient()
+
+        // Your existing WebChromeClient for debugging is preserved
+        webView.webChromeClient = object : WebChromeClient() {
+            override fun onConsoleMessage(consoleMessage: ConsoleMessage): Boolean {
+                Log.d("MyWebView", "${consoleMessage.message()} -- From line " +
+                        "${consoleMessage.lineNumber()} of ${consoleMessage.sourceId()}")
+                return true
+            }
+
+            override fun onJsAlert(view: WebView, url: String, message: String, result: JsResult): Boolean {
+                AlertDialog.Builder(this@MainActivity)
+                    .setTitle("Alert")
+                    .setMessage(message)
+                    .setPositiveButton(android.R.string.ok) { _, _ -> result.confirm() }
+                    .setCancelable(false)
+                    .create()
+                    .show()
+                return true
+            }
+
+            override fun onJsConfirm(view: WebView, url: String, message: String, result: JsResult): Boolean {
+                AlertDialog.Builder(this@MainActivity)
+                    .setTitle("Confirmation")
+                    .setMessage(message)
+                    .setPositiveButton(android.R.string.ok) { _, _ -> result.confirm() }
+                    .setNegativeButton(android.R.string.cancel) { _, _ -> result.cancel() }
+                    .setCancelable(false)
+                    .create()
+                    .show()
+                return true
+            }
+        }
+
+        // --- NEW: START LOCAL WEB SERVER ---
+        try {
+            server = AndroidWebServer(serverPort, assets)
+            server?.start()
+            Log.d("MainActivity", "Local web server started.")
+        } catch (e: IOException) {
+            Log.e("MainActivity", "Error starting web server", e)
+        }
+        // --- END OF SERVER START ---
+
+        // This remains the same, for the phone's display
+        webView.loadUrl("file:///android_asset/Index.html")
+    }
+
+    // --- NEW: ACTIVITY LIFECYCLE AND MENU METHODS FOR CHROMECAST ---
+    override fun onDestroy() {
+        super.onDestroy()
+        // Important: Stop the server when the app is closed
+        server?.stop()
+        Log.d("MainActivity", "Local web server stopped.")
+    }
+
+    override fun onResume() {
+        super.onResume()
+        castSession = sessionManager.currentCastSession
+        sessionManager.addSessionManagerListener(sessionManagerListener)
+    }
+
+    override fun onPause() {
+        super.onPause()
+        sessionManager.removeSessionManagerListener(sessionManagerListener)
+        castSession = null
+    }
+
+    override fun onCreateOptionsMenu(menu: Menu): Boolean {
+        super.onCreateOptionsMenu(menu)
+        menuInflater.inflate(R.menu.main_menu, menu)
+        // This line makes the Cast button appear and function
+        CastButtonFactory.setUpMediaRouteButton(applicationContext, menu, R.id.media_route_menu_item)
+        return true
+    }
+    // --- END OF NEW METHODS ---
+
+
+    // --- NEW: HELPER METHODS FOR CHROMECAST ---
+    private fun sendMessageToReceiver(message: String) {
+        castSession?.sendMessage(MESSAGE_NAMESPACE, message)?.setResultCallback { status ->
+            if (!status.isSuccess) {
+                Log.e("MainActivity", "Failed to send message: ${status.statusCode}")
+            } else {
+                Log.d("MainActivity", "Successfully sent message: $message")
+            }
+        }
+    }
+
+    private fun getLocalIpAddress(): String? {
+        try {
+            val wifiManager = applicationContext.getSystemService(Context.WIFI_SERVICE) as WifiManager
+            val ipAddress = wifiManager.connectionInfo.ipAddress
+            if (ipAddress == 0) return null
+            // Formats the IP address and appends the server port
+            return String.format(
+                "http://%d.%d.%d.%d:%d", // Prepend http://
+                ipAddress and 0xff,
+                ipAddress shr 8 and 0xff,
+                ipAddress shr 16 and 0xff,
+                ipAddress shr 24 and 0xff,
+                serverPort
+            )
+        } catch (e: Exception) {
+            Log.e("MainActivity", "Error getting IP address", e)
+            return null
+        }
+    }
+    // --- END OF HELPER METHODS ---
+}
